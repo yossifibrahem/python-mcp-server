@@ -170,9 +170,6 @@ def _pip_install(packages: List[str], upgrade: bool = False) -> dict:
 async def install_packages(params: InstallPackagesInput) -> str:
     """Install one or more pip packages into the active Python environment.
 
-    Uses the same interpreter that runs this MCP server, so installed packages
-    are immediately importable in subsequent run_python calls.
-
     Args:
         params (InstallPackagesInput):
             - packages (List[str]): pip specifiers, e.g. ['numpy', 'pandas>=2', 'requests==2.31'].
