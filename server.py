@@ -162,12 +162,12 @@ def _pip_install(packages: List[str], upgrade: bool = False) -> dict:
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
 
-@mcp.tool(name="install_packages", annotations={
+@mcp.tool(name="pip_install", annotations={
     "title": "Install Python Packages",
     "readOnlyHint": False, "destructiveHint": False,
     "idempotentHint": True, "openWorldHint": True,
 })
-async def install_packages(params: InstallPackagesInput) -> str:
+async def pip_install(params: InstallPackagesInput) -> str:
     """Install one or more pip packages into the active Python environment.
 
     Args:

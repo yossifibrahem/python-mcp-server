@@ -20,7 +20,7 @@ Returns plain text with the status, exit code, elapsed time, stdout, and stderr.
 
 ---
 
-### `install_packages`
+### `pip_install`
 
 Install pip packages into the active Python environment. Installed packages are immediately importable in subsequent `python_run` calls.
 
