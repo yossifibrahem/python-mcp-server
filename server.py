@@ -1,5 +1,6 @@
 """Python Code Runner MCP Server"""
 
+import ast
 import sys
 import json
 import subprocess
@@ -17,6 +18,60 @@ PYTHON_BIN      = sys.executable
 
 mcp = FastMCP("python_runner_mcp")
 
+# Modules that provide OS-level access
+BLOCKED_MODULES = {
+    "os", "os.path", "sys", "subprocess", "shutil", "pathlib",
+    "socket", "socketserver", "ctypes", "ctypes.util",
+    "multiprocessing", "concurrent.futures",
+    "tempfile", "glob", "fnmatch",
+    "signal", "resource", "mmap",
+    "pwd", "grp", "fcntl", "termios", "tty", "pty",
+    "winreg", "winsound", "msvcrt",
+    "importlib", "importlib.util", "importlib.machinery",
+    "builtins", "gc", "inspect", "dis",
+}
+
+# Built-in calls that bypass import restrictions
+BLOCKED_BUILTINS = {"open", "exec", "eval", "compile", "__import__", "breakpoint"}
+
+
+class SecurityError(ValueError):
+    pass
+
+
+def _check_code(code: str) -> None:
+    """Parse code as an AST and raise SecurityError if any OS operations are detected."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        raise SecurityError(f"Syntax error: {exc}") from exc
+
+    for node in ast.walk(tree):
+        # Block: import os / import subprocess / ...
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if alias.name in BLOCKED_MODULES or top in BLOCKED_MODULES:
+                    raise SecurityError(f"Import of '{alias.name}' is not allowed.")
+
+        # Block: from os import ... / from pathlib import Path / ...
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            top = module.split(".")[0]
+            if module in BLOCKED_MODULES or top in BLOCKED_MODULES:
+                raise SecurityError(f"Import from '{module}' is not allowed.")
+
+        # Block: open(...) / exec(...) / eval(...) / __import__(...) / ...
+        elif isinstance(node, ast.Call):
+            func = node.func
+            name = None
+            if isinstance(func, ast.Name):
+                name = func.id
+            elif isinstance(func, ast.Attribute):
+                name = func.attr
+            if name in BLOCKED_BUILTINS:
+                raise SecurityError(f"Use of '{name}' is not allowed.")
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -28,6 +83,11 @@ def _truncate(text: str) -> str:
 
 
 def _run_code(code: str, timeout: int, env_vars: dict) -> str:
+    try:
+        _check_code(code)
+    except SecurityError as exc:
+        return f"Blocked: {exc}"
+
     env = {**os.environ, **env_vars}
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(code)
