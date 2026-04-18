@@ -1,160 +1,193 @@
-"""
-Python Runner MCP Server
-Exposes a single tool: run_python — executes arbitrary Python code in a sandboxed subprocess.
-"""
+"""Python Code Runner MCP Server"""
 
-import asyncio
-import json
 import sys
+import json
+import subprocess
 import tempfile
 import os
-from typing import Optional
-
-from mcp.server.fastmcp import FastMCP
+import time
+from typing import Optional, List
 from pydantic import BaseModel, Field, ConfigDict
+from mcp.server.fastmcp import FastMCP
 
-# ---------------------------------------------------------------------------
-# Server init
-# ---------------------------------------------------------------------------
+DEFAULT_TIMEOUT = 30
+MAX_TIMEOUT     = 120
+MAX_OUTPUT_LEN  = 20_000
+PYTHON_BIN      = sys.executable
+
 mcp = FastMCP("python_runner_mcp")
 
-# Execution limits
-DEFAULT_TIMEOUT: int = 30   # seconds
-MAX_OUTPUT_CHARS: int = 10_000
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _truncate(text: str) -> str:
+    if len(text) <= MAX_OUTPUT_LEN:
+        return text
+    half = MAX_OUTPUT_LEN // 2
+    return text[:half] + f"\n\n... [truncated] ...\n\n" + text[-half:]
 
 
-# ---------------------------------------------------------------------------
-# Input model
-# ---------------------------------------------------------------------------
-class RunPythonInput(BaseModel):
-    """Input for the run_python tool."""
-
-    model_config = ConfigDict(
-        str_strip_whitespace=True,
-        validate_assignment=True,
-        extra="forbid",
-    )
-
-    code: str = Field(
-        ...,
-        description="Python source code to execute. May be multi-line.",
-        min_length=1,
-    )
-    timeout: Optional[int] = Field(
-        default=DEFAULT_TIMEOUT,
-        description=f"Maximum execution time in seconds (default {DEFAULT_TIMEOUT}, max 120).",
-        ge=1,
-        le=120,
-    )
-    stdin: Optional[str] = Field(
-        default=None,
-        description="Optional string to pass as standard input to the script.",
-    )
+def _run_code(code: str, timeout: int, env_vars: dict) -> str:
+    env = {**os.environ, **env_vars}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(code)
+        tmp = f.name
+    try:
+        t0 = time.perf_counter()
+        proc = subprocess.run(
+            [PYTHON_BIN, tmp], capture_output=True, text=True, timeout=timeout, env=env
+        )
+        elapsed = round(time.perf_counter() - t0, 3)
+        status = "Success" if proc.returncode == 0 else "Failed"
+        parts = [f"{status} (exit {proc.returncode}, {elapsed}s)"]
+        if proc.stdout: parts += ["\nstdout:", _truncate(proc.stdout)]
+        if proc.stderr: parts += ["\nstderr:", _truncate(proc.stderr)]
+        return "\n".join(parts)
+    except subprocess.TimeoutExpired:
+        return f"Timed out after {timeout}s."
+    except Exception as exc:
+        return f"Error: {exc}"
+    finally:
+        os.unlink(tmp)
 
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-def _truncate(text: str, label: str) -> str:
-    if len(text) > MAX_OUTPUT_CHARS:
-        kept = text[:MAX_OUTPUT_CHARS]
-        dropped = len(text) - MAX_OUTPUT_CHARS
-        return f"{kept}\n… [{label} truncated — {dropped} chars omitted]"
-    return text
+# ── Input models ───────────────────────────────────────────────────────────────
+
+class RunCodeInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    code: str = Field(..., description="Python source code to execute.", min_length=1)
+    timeout: Optional[int] = Field(default=DEFAULT_TIMEOUT, ge=1, le=MAX_TIMEOUT,
+        description="Max execution time in seconds (default 30, max 120).")
+    env_vars: Optional[dict] = Field(default_factory=dict,
+        description="Extra environment variables (dict of str→str).")
 
 
-# ---------------------------------------------------------------------------
-# Tool
-# ---------------------------------------------------------------------------
-@mcp.tool(
-    name="run_python",
-    annotations={
-        "title": "Run Python Script",
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": False,
-        "openWorldHint": False,
-    },
-)
-async def run_python(params: RunPythonInput) -> str:
-    """Execute Python code in an isolated subprocess and return stdout, stderr, and exit code.
+class InstallPackagesInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    packages: List[str] = Field(..., min_length=1,
+        description="pip package specifiers to install (e.g. ['numpy', 'requests==2.31', 'pandas>=2']).")
+    upgrade: Optional[bool] = Field(default=False,
+        description="Pass --upgrade to pip so already-installed packages are upgraded.")
 
-    Use for computation, transformation, and logic that is faster and more reliable to run than to reason through manually
 
-    The code runs in a temporary file using the same Python interpreter as this server
-    (sys.executable). Output is capped at 10 000 characters per stream.
+class RunWithPackagesInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    code: str = Field(..., description="Python source code to execute.", min_length=1)
+    packages: List[str] = Field(..., min_length=1,
+        description="pip package specifiers to install first (e.g. ['numpy', 'requests==2.31']).")
+    timeout: Optional[int] = Field(default=DEFAULT_TIMEOUT, ge=1, le=MAX_TIMEOUT,
+        description="Execution timeout in seconds (install time is not counted).")
+
+
+# ── Helpers (pip) ──────────────────────────────────────────────────────────────
+
+def _pip_install(packages: List[str], upgrade: bool = False) -> dict:
+    """Run pip install and return a structured result dict."""
+    cmd = [PYTHON_BIN, "-m", "pip", "install", "--quiet"]
+    if upgrade:
+        cmd.append("--upgrade")
+    cmd += packages
+
+    try:
+        t0 = time.perf_counter()
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        elapsed = round(time.perf_counter() - t0, 3)
+        return {
+            "success": proc.returncode == 0,
+            "exit_code": proc.returncode,
+            "elapsed_s": elapsed,
+            "stdout": _truncate(proc.stdout),
+            "stderr": _truncate(proc.stderr),
+            "timed_out": False,
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "exit_code": -1, "elapsed_s": 180,
+                "stdout": "", "stderr": "", "timed_out": True}
+    except Exception as exc:
+        return {"success": False, "exit_code": -1, "elapsed_s": 0,
+                "stdout": "", "stderr": str(exc), "timed_out": False}
+
+
+# ── Tools ──────────────────────────────────────────────────────────────────────
+
+@mcp.tool(name="install_packages", annotations={
+    "title": "Install Python Packages",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": True, "openWorldHint": True,
+})
+async def install_packages(params: InstallPackagesInput) -> str:
+    """Install one or more pip packages into the active Python environment.
+
+    Uses the same interpreter that runs this MCP server, so installed packages
+    are immediately importable in subsequent run_python calls.
 
     Args:
-        params (RunPythonInput): Validated input containing:
-            - code (str): Python source code to run.
-            - timeout (int): Max execution time in seconds (1-120, default 30).
-            - stdin (Optional[str]): Data to feed to the script via stdin.
+        params (InstallPackagesInput):
+            - packages (List[str]): pip specifiers, e.g. ['numpy', 'pandas>=2', 'requests==2.31'].
+            - upgrade (bool, optional): Re-install / upgrade already-present packages (default False).
 
     Returns:
         str: JSON object with fields:
-            - stdout (str): Captured standard output.
-            - stderr (str): Captured standard error.
-            - exit_code (int): Process exit code (0 = success).
-            - timed_out (bool): True if execution was killed by the timeout.
-            - error (str | null): High-level error message, if any.
+            - success (bool): True if pip exited 0.
+            - exit_code (int): pip's exit code.
+            - elapsed_s (float): Seconds taken.
+            - packages (List[str]): The specifiers that were requested.
+            - stdout (str): pip output.
+            - stderr (str): pip error output.
+            - timed_out (bool): True if pip was killed by the 180 s hard limit.
     """
-    result = {
-        "stdout": "",
-        "stderr": "",
-        "exit_code": -1,
-        "timed_out": False,
-        "error": None,
-    }
-
-    # Write code to a temp file so tracebacks show a real path
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, encoding="utf-8"
-    ) as tmp:
-        tmp.write(params.code)
-        tmp_path = tmp.name
-
-    try:
-        stdin_bytes = params.stdin.encode() if params.stdin else None
-
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            tmp_path,
-            stdin=asyncio.subprocess.PIPE if stdin_bytes else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(input=stdin_bytes),
-                timeout=params.timeout,
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            result["timed_out"] = True
-            result["error"] = (
-                f"Execution timed out after {params.timeout} seconds and was terminated."
-            )
-            return json.dumps(result, indent=2)
-
-        result["stdout"] = _truncate(stdout_b.decode(errors="replace"), "stdout")
-        result["stderr"] = _truncate(stderr_b.decode(errors="replace"), "stderr")
-        result["exit_code"] = proc.returncode
-
-    except Exception as exc:  # noqa: BLE001
-        result["error"] = f"Failed to launch subprocess: {exc}"
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
+    result = _pip_install(params.packages, params.upgrade or False)
+    result["packages"] = params.packages
     return json.dumps(result, indent=2)
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+@mcp.tool(name="python_run", annotations={
+    "title": "Run Python Code",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": True,
+})
+async def python_run(params: RunCodeInput) -> str:
+    """Execute Python code in an isolated subprocess and return stdout/stderr.
+
+    Args:
+        params (RunCodeInput):
+            - code (str): Python source code to run.
+            - timeout (int, optional): Kill after N seconds (default 30, max 120).
+            - env_vars (dict, optional): Extra environment variables.
+
+    Returns:
+        str: Status, exit code, elapsed time, stdout, and stderr.
+    """
+    return _run_code(params.code, params.timeout or DEFAULT_TIMEOUT, params.env_vars or {})
+
+
+@mcp.tool(name="python_run_with_packages", annotations={
+    "title": "Install Packages & Run Python Code",
+    "readOnlyHint": False, "destructiveHint": False,
+    "idempotentHint": False, "openWorldHint": True,
+})
+async def python_run_with_packages(params: RunWithPackagesInput) -> str:
+    """pip-install packages then execute Python code, returning combined output.
+
+    Args:
+        params (RunWithPackagesInput):
+            - code (str): Python source code to run.
+            - packages (List[str]): pip specifiers to install first.
+            - timeout (int, optional): Execution timeout in seconds.
+
+    Returns:
+        str: Install log followed by execution result.
+    """
+    pip = _pip_install(params.packages)
+    ok = pip["success"]
+    log = _truncate(pip["stdout"] + pip["stderr"])
+    status = "ok" if ok else "failed"
+    header = f"install {status}: {', '.join(params.packages)}\n{log or '(no output)'}"
+
+    if not ok:
+        return header
+    return header + "\n\n" + _run_code(params.code, params.timeout or DEFAULT_TIMEOUT, {})
+
+
 if __name__ == "__main__":
-    mcp.run()  # stdio transport by default
+    mcp.run()
