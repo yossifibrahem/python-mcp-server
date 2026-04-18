@@ -70,14 +70,6 @@ class InstallPackagesInput(BaseModel):
         description="Pass --upgrade to pip so already-installed packages are upgraded.")
 
 
-class RunWithPackagesInput(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    code: str = Field(..., description="Python source code to execute.", min_length=1)
-    packages: List[str] = Field(..., min_length=1,
-        description="pip package specifiers to install first (e.g. ['numpy', 'requests==2.31']).")
-    timeout: Optional[int] = Field(default=DEFAULT_TIMEOUT, ge=1, le=MAX_TIMEOUT,
-        description="Execution timeout in seconds (install time is not counted).")
-
 
 # ── Helpers (pip) ──────────────────────────────────────────────────────────────
 
@@ -159,34 +151,6 @@ async def python_run(params: RunCodeInput) -> str:
         str: Status, exit code, elapsed time, stdout, and stderr.
     """
     return _run_code(params.code, params.timeout or DEFAULT_TIMEOUT, params.env_vars or {})
-
-
-@mcp.tool(name="python_run_with_packages", annotations={
-    "title": "Install Packages & Run Python Code",
-    "readOnlyHint": False, "destructiveHint": False,
-    "idempotentHint": False, "openWorldHint": True,
-})
-async def python_run_with_packages(params: RunWithPackagesInput) -> str:
-    """pip-install packages then execute Python code, returning combined output.
-
-    Args:
-        params (RunWithPackagesInput):
-            - code (str): Python source code to run.
-            - packages (List[str]): pip specifiers to install first.
-            - timeout (int, optional): Execution timeout in seconds.
-
-    Returns:
-        str: Install log followed by execution result.
-    """
-    pip = _pip_install(params.packages)
-    ok = pip["success"]
-    log = _truncate(pip["stdout"] + pip["stderr"])
-    status = "ok" if ok else "failed"
-    header = f"install {status}: {', '.join(params.packages)}\n{log or '(no output)'}"
-
-    if not ok:
-        return header
-    return header + "\n\n" + _run_code(params.code, params.timeout or DEFAULT_TIMEOUT, {})
 
 
 if __name__ == "__main__":

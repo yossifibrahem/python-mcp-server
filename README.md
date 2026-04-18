@@ -45,20 +45,6 @@ Returns a JSON object:
 
 ---
 
-### `python_run_with_packages`
-
-Install packages and execute code in one step.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `code` | `str` | required | Python source code to execute |
-| `packages` | `List[str]` | required | pip specifiers to install before running |
-| `timeout` | `int` | `30` | Execution timeout in seconds (1–120, install time not counted) |
-
-Returns the install log followed by the execution result as plain text.
-
----
-
 ## Setup
 
 ```bash
@@ -103,4 +89,4 @@ Restart Claude Desktop after editing.
 
 ## Security note
 
-All three tools execute code or install packages with the same privileges as the server process. Only connect this server to trusted Claude Desktop sessions and do **not** expose it over the network.
+Both tools execute code or install packages with the same privileges as the server process. Only connect this server to trusted Claude Desktop sessions and do **not** expose it over the network.
