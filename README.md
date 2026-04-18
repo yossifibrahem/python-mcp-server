@@ -29,19 +29,10 @@ Install pip packages into the active Python environment. Installed packages are 
 | `packages` | `List[str]` | required | pip specifiers, e.g. `["numpy", "pandas>=2", "requests==2.31"]` |
 | `upgrade` | `bool` | `false` | Pass `--upgrade` to reinstall or upgrade already-installed packages |
 
-Returns a JSON object:
-
-```json
-{
-  "success": true,
-  "exit_code": 0,
-  "elapsed_s": 3.2,
-  "packages": ["numpy"],
-  "stdout": "",
-  "stderr": "",
-  "timed_out": false
-}
-```
+Returns a single line:
+- **Success**: `installed: numpy, pandas (3.2s)`
+- **Failure**: `install failed: <pip error>`
+- **Timeout**: `install timed out after 180s.`
 
 ---
 

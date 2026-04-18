@@ -179,18 +179,16 @@ async def install_packages(params: InstallPackagesInput) -> str:
             - upgrade (bool, optional): Re-install / upgrade already-present packages (default False).
 
     Returns:
-        str: JSON object with fields:
-            - success (bool): True if pip exited 0.
-            - exit_code (int): pip's exit code.
-            - elapsed_s (float): Seconds taken.
-            - packages (List[str]): The specifiers that were requested.
-            - stdout (str): pip output.
-            - stderr (str): pip error output.
-            - timed_out (bool): True if pip was killed by the 180 s hard limit.
+        str: Single line — "installed: <packages> (<elapsed>s)" on success,
+             "install failed: <error>" on failure, or "install timed out" if pip exceeded 180s.
     """
     result = _pip_install(params.packages, params.upgrade or False)
-    result["packages"] = params.packages
-    return json.dumps(result, indent=2)
+    if result["timed_out"]:
+        return "install timed out after 180s."
+    if result["success"]:
+        return f"installed: {', '.join(params.packages)} ({result['elapsed_s']}s)"
+    error = result["stderr"].strip() or result["stdout"].strip() or "unknown error"
+    return f"install failed: {error}"
 
 
 @mcp.tool(name="python_run", annotations={
