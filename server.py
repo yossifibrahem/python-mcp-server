@@ -8,7 +8,7 @@ import tempfile
 import os
 import time
 from typing import Optional, List
-from pydantic import BaseModel, Field, ConfigDict
+
 from mcp.server.fastmcp import FastMCP
 
 DEFAULT_TIMEOUT = 30
@@ -83,6 +83,9 @@ def _truncate(text: str) -> str:
 
 
 def _run_code(code: str, timeout: int, env_vars: dict) -> str:
+    if not (1 <= timeout <= MAX_TIMEOUT):
+        return f"Invalid timeout: must be between 1 and {MAX_TIMEOUT} seconds."
+
     try:
         _check_code(code)
     except SecurityError as exc:
@@ -109,25 +112,6 @@ def _run_code(code: str, timeout: int, env_vars: dict) -> str:
         return f"Error: {exc}"
     finally:
         os.unlink(tmp)
-
-
-# ── Input models ───────────────────────────────────────────────────────────────
-
-class RunCodeInput(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    code: str = Field(..., description="Python source code to execute.", min_length=1)
-    timeout: Optional[int] = Field(default=DEFAULT_TIMEOUT, ge=1, le=MAX_TIMEOUT,
-        description="Max execution time in seconds (default 30, max 120).")
-    env_vars: Optional[dict] = Field(default_factory=dict,
-        description="Extra environment variables (dict of str→str).")
-
-
-class InstallPackagesInput(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    packages: List[str] = Field(..., min_length=1,
-        description="pip package specifiers to install (e.g. ['numpy', 'requests==2.31', 'pandas>=2']).")
-    upgrade: Optional[bool] = Field(default=False,
-        description="Pass --upgrade to pip so already-installed packages are upgraded.")
 
 
 
@@ -167,23 +151,25 @@ def _pip_install(packages: List[str], upgrade: bool = False) -> dict:
     "readOnlyHint": False, "destructiveHint": False,
     "idempotentHint": True, "openWorldHint": True,
 })
-async def pip_install(params: InstallPackagesInput) -> str:
+async def pip_install(
+    packages: List[str],
+    upgrade: bool = False,
+) -> str:
     """Install one or more pip packages into the active Python environment.
 
     Args:
-        params (InstallPackagesInput):
-            - packages (List[str]): pip specifiers, e.g. ['numpy', 'pandas>=2', 'requests==2.31'].
-            - upgrade (bool, optional): Re-install / upgrade already-present packages (default False).
+        packages (List[str]): pip specifiers, e.g. ['numpy', 'pandas>=2', 'requests==2.31'].
+        upgrade (bool, optional): Re-install / upgrade already-present packages (default False).
 
     Returns:
         str: Single line — "installed: <packages> (<elapsed>s)" on success,
              "install failed: <error>" on failure, or "install timed out" if pip exceeded 180s.
     """
-    result = _pip_install(params.packages, params.upgrade or False)
+    result = _pip_install(packages, upgrade)
     if result["timed_out"]:
         return "install timed out after 180s."
     if result["success"]:
-        return f"installed: {', '.join(params.packages)} ({result['elapsed_s']}s)"
+        return f"installed: {', '.join(packages)} ({result['elapsed_s']}s)"
     error = result["stderr"].strip() or result["stdout"].strip() or "unknown error"
     return f"install failed: {error}"
 
@@ -193,19 +179,22 @@ async def pip_install(params: InstallPackagesInput) -> str:
     "readOnlyHint": False, "destructiveHint": False,
     "idempotentHint": False, "openWorldHint": True,
 })
-async def python_run(params: RunCodeInput) -> str:
+async def python_run(
+    code: str,
+    timeout: int = DEFAULT_TIMEOUT,
+    env_vars: Optional[dict] = None,
+) -> str:
     """Execute Python code in an isolated subprocess and return stdout/stderr.
 
     Args:
-        params (RunCodeInput):
-            - code (str): Python source code to run.
-            - timeout (int, optional): Kill after N seconds (default 30, max 120).
-            - env_vars (dict, optional): Extra environment variables.
+        code (str): Python source code to run.
+        timeout (int, optional): Kill after N seconds (default 30, max 120).
+        env_vars (dict, optional): Extra environment variables.
 
     Returns:
         str: Status, exit code, elapsed time, stdout, and stderr.
     """
-    return _run_code(params.code, params.timeout or DEFAULT_TIMEOUT, params.env_vars or {})
+    return _run_code(code, timeout, env_vars or {})
 
 
 if __name__ == "__main__":
